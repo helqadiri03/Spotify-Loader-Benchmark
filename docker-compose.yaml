@@ -62,17 +62,24 @@ services:
     volumes:
       - cassandra_data:/var/lib/cassandra
 
-  flink:
+  flink-jobmanager:
     build: flink/
+    command: jobmanager
     ports:
       - "8081:8081"
     environment:
-      FLINK_PROPERTIES: |
-        taskmanager.numberOfTaskSlots: 2
-        taskmanager.memory.process.size: 1024m
-        taskmanager.memory.jvm-metaspace.size: 256m
-        taskmanager.memory.jvm-overhead.max: 100m
-        taskmanager.memory.jvm-overhead.min: 100m
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+    volumes:
+      - flink_data:/tmp
+
+  flink-taskmanager:
+    build: flink/
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      TASK_MANAGER_NUMBER_OF_TASK_SLOTS: 2
     volumes:
       - flink_data:/tmp
   grafana:
