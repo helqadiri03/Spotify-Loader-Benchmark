@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2182
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_MS: 10000
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    ports:
+      - "2182:2182"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2182
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_MAX_CLIENT_CNXNS: 1000
+      ZOOKEEPER_AUTO_CONF_ENABLE: true
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: stat, ruok, conf, cons, srvr, mntr
+
+  postgres:
+    image: postgres:13
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "6543:6543"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: benchmark
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    
+  cassandra:
+    image: cassandra:latest
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT NOW()'"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: 'benchmark'
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      CASSANDRA_NUM_TOKENS: 256
+      CASSANDRA_DC: datacenter1
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+
+  flink:
+    build: flink/
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 1024m
+        taskmanager.memory.jvm-metaspace.size: 256m
+        taskmanager.memory.jvm-overhead.max: 100m
+        taskmanager.memory.jvm-overhead.min: 100m
+    volumes:
+      - flink_data:/tmp
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3001"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  airflow-init:
+    build: airflow/
+    command: bash -c "airflow db migrate"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/benchmark
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    build: airflow/
+    command: api-server
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/benchmark
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-./airflow}/dags:/opt/airflow/dags
+      - ${AIRFLOW_PROJ_DIR:-./airflow}/logs:/opt/airflow/logs
+      - ${AIRFLOW_PROJ_DIR:-./airflow}/config:/opt/airflow/config
+      - ${AIRFLOW_PROJ_DIR:-./airflow}/plugins:/opt/airflow/plugins
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  cassandra_data:
+  flink_data:
+  grafana_data:
+  airflow_data:
+  airflow_logs:
+  airflow_config:
+  airflow_plugins:
