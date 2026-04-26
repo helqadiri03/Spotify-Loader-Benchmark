@@ -1,0 +1,63 @@
+{
+  "title": "Spotify Loader Benchmark",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Loader Race (Rows Inserted)",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "targets": [
+        {
+          "datasource": "PostgreSQL",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS \"time\", strategy, MAX(rows_inserted) AS rows FROM bench_events WHERE $__timeFilter(ts) GROUP BY ts, strategy ORDER BY ts",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Throughput (Rows/sec)",
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "PostgreSQL",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS \"time\", strategy, MAX(throughput_rps) AS rps FROM bench_events WHERE $__timeFilter(ts) GROUP BY ts, strategy ORDER BY ts",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Usage (%)",
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": "PostgreSQL",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS \"time\", strategy, MAX(cpu_pct) AS cpu FROM bench_events WHERE $__timeFilter(ts) GROUP BY ts, strategy ORDER BY ts",
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Final Results",
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "datasource": "PostgreSQL",
+          "rawQuery": true,
+          "rawSql": "SELECT loader, rows_loaded, round(duration_sec::numeric, 2) AS \"Duration (s)\", round(rows_per_sec::numeric, 0) AS \"Rows/sec\", peak_cpu_pct, peak_mem_mb, error_count FROM benchmark_results ORDER BY duration_sec ASC",
+          "format": "table"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 30,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  }
+}
