@@ -1,33 +1,41 @@
-services:
-  kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    container_name: kafka-broker
-    ports:
-      - "9093:9093"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2182
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker:9093,PLAINTEXT_HOST://localhost:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_LOG_RETENTION_BYTES: 1073741824
-      KAFKA_LOG_RETENTION_MS: 10000
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server=localhost:9093 || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-    depends_on:
-      zookeeper:
-        condition: service_started
+version: '3.8'
 
+x-airflow-common: &airflow-common
+  build: airflow/
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/benchmark
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.session'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution'
+    AIRFLOW__CORE__INTERNAL_API_SECRET_KEY: 'SQ7pu_ZTwIk29L5UYYMojr67Y_a_pO0qaE5FwObOsBA='
+    AIRFLOW__API_AUTH__JWT_SECRET: 'SQ7pu_ZTwIk29L5UYYMojr67Y_a_pO0qaE5FwObOsBA='
+    AIRFLOW__CORE__EXECUTION_API_TIMEOUT: '60'
+    AIRFLOW__CORE__ADMIN_USERNAME: admin
+    AIRFLOW__CORE__ADMIN_PASSWORD: admin
+    # Loader env vars (used by loader scripts inside the container)
+    KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    PG_DSN: postgresql://postgres:postgres@postgres:5432/benchmark
+    CASSANDRA_HOST: cassandra
+    REDIS_URL: redis://redis:6379/0
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-./airflow}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-./airflow}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-./airflow}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-./airflow}/plugins:/opt/airflow/plugins
+    - ./metrics:/opt/metrics
+    - ./data:/opt/data
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  # ── Zookeeper ──────────────────────────────────────────────────────────────
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    container_name: zookeeper-server
+    image: confluentinc/cp-zookeeper:7.4.0
     ports:
       - "2182:2182"
     environment:
@@ -36,38 +44,71 @@ services:
       ZOOKEEPER_INIT_LIMIT: 5
       ZOOKEEPER_SYNC_LIMIT: 2
       ZOOKEEPER_MAX_CLIENT_CNXNS: 1000
-      ZOOKEEPER_4LW_COMMANDS_WHITELIST: "stat, ruok, conf, cons, srvr, mntr"
+      ZOOKEEPER_AUTO_CONF_ENABLE: true
+      ZOOKEEPER_4LW_COMMANDS_WHITELIST: stat, ruok, conf, cons, srvr, mntr
+
+  # ── Kafka (KRaft mode) ──────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc localhost 2182 | grep imok"]
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
 
+  # ── Kafka topic initializer ────────────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic playlist-raw --partitions 6 --replication-factor 1 --config retention.ms=7200000 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic bench-metrics --partitions 1 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic dlq --partitions 1 --replication-factor 1 &&
+      echo 'All Kafka topics created.'
+    restart: "no"
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
     image: postgres:13
-    container_name: postgres-server
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
     ports:
-      - "6543:6543"
+      - "6543:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: benchmark
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    
+      - ./init/postgres_init.sql:/docker-entrypoint-initdb.d/01_init.sql
+
+  # ── Cassandra ─────────────────────────────────────────────────────────────
   cassandra:
     image: cassandra:latest
-    container_name: cassandra-server
     healthcheck:
-      test: ["CMD-SHELL", "cqlsh -e 'SELECT NOW()'"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES'"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
     ports:
       - "9042:9042"
     environment:
@@ -78,94 +119,143 @@ services:
     volumes:
       - cassandra_data:/var/lib/cassandra
 
+  # ── Cassandra schema initializer ──────────────────────────────────────────
+  cassandra-init:
+    image: cassandra:latest
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./init:/init
+    entrypoint: ["/bin/bash", "-c"]
+    command: "cqlsh cassandra -f /init/cassandra_init.cql && echo 'Cassandra schema ready.'"
+    restart: "no"
+
+  # ── Redis (Celery broker) ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Flink ─────────────────────────────────────────────────────────────────
   flink-jobmanager:
-    build: flink/
-    container_name: flink-jobmanager-server
+    image: flink:1.17-scala_2.12-java11
     command: jobmanager
     ports:
-      - "8081:8081"
+      - "8082:8081"
     environment:
-      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      FLINK_PROPERTIES: "jobmanager.rpc.address: flink-jobmanager"
     volumes:
       - flink_data:/tmp
 
   flink-taskmanager:
-    build: flink/
-    container_name: flink-taskmanager-server
+    image: flink:1.17-scala_2.12-java11
     command: taskmanager
     depends_on:
       - flink-jobmanager
     environment:
-      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
-      TASK_MANAGER_NUMBER_OF_TASK_SLOTS: 2
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
     volumes:
       - flink_data:/tmp
+
+  # ── Bench aggregator (reads bench-metrics → Cassandra + PostgreSQL) ────────
+  bench-aggregator:
+    build:
+      context: flink/
+      dockerfile: Dockerfile
+    command: python3 /app/bench_aggregator.py
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PG_DSN: postgresql://postgres:postgres@postgres:5432/benchmark
+      CASSANDRA_HOST: cassandra
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Celery worker ─────────────────────────────────────────────────────────
+  celery-worker:
+    build: metrics/
+    command: celery -A celery_app worker --concurrency=4 --loglevel=info
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PG_DSN: postgresql://postgres:postgres@postgres:5432/benchmark
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Grafana ───────────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:latest
     ports:
-      - "3001:3001"
+      - "3001:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
 
+  # ── Airflow init ──────────────────────────────────────────────────────────
   airflow-init:
-    build: airflow/
-    container_name: airflow-init-server
+    <<: *airflow-common
     command: bash -c "airflow db migrate"
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/benchmark
-      AIRFLOW__CORE__FERNET_KEY: ''
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    user: "${AIRFLOW_UID:-50000}:0"
-    depends_on:
-      postgres:
-        condition: service_healthy
+    restart: "no"
 
-  airflow-webserver:
-    build: airflow/
-    container_name: airflow-webserver-server
-    command: api-server
-    ports:
-      - "8080:8080"
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/benchmark
-      AIRFLOW__CORE__FERNET_KEY: ''
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-      _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
-    volumes:
-      - ${AIRFLOW_PROJ_DIR:-./airflow}/dags:/opt/airflow/dags
-      - ${AIRFLOW_PROJ_DIR:-./airflow}/logs:/opt/airflow/logs
-      - ${AIRFLOW_PROJ_DIR:-./airflow}/config:/opt/airflow/config
-      - ${AIRFLOW_PROJ_DIR:-./airflow}/plugins:/opt/airflow/plugins
-    user: "${AIRFLOW_UID:-50000}:0"
+  # ── Airflow scheduler ─────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
     depends_on:
       postgres:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
+    restart: unless-stopped
 
-  metrics-producer:
-    build: metrics/
-    container_name: metrics-producer-server
-    command: python producer.py
-    depends_on:
-      kafka:
-        condition: service_healthy
-      flink-jobmanager:
-        condition: service_started
-      flink-taskmanager:
-        condition: service_started
-    volumes:
-      - ./data:/app/data:ro
+  # ── Airflow webserver ─────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8079:8080"
     environment:
-      KAFKA_BROKER_URL: kafka-broker:9093
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/benchmark
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.session'
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution'
+      AIRFLOW__CORE__INTERNAL_API_SECRET_KEY: 'SQ7pu_ZTwIk29L5UYYMojr67Y_a_pO0qaE5FwObOsBA='
+      AIRFLOW__API_AUTH__JWT_SECRET: 'SQ7pu_ZTwIk29L5UYYMojr67Y_a_pO0qaE5FwObOsBA='
+      AIRFLOW__CORE__EXECUTION_API_TIMEOUT: '60'
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      AIRFLOW__CORE__ADMIN_USERNAME: admin
+      AIRFLOW__CORE__ADMIN_PASSWORD: admin
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PG_DSN: postgresql://postgres:postgres@postgres:5432/benchmark
+      CASSANDRA_HOST: cassandra
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   postgres_data:
