@@ -1,11 +1,15 @@
-FROM flink:scala_2.12-java21
+FROM python:3.11-slim
 
-USER root
+WORKDIR /app
+
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    && apt-get autoremove -y \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends libpq-dev gcc && \
+    rm -rf /var/lib/apt/lists/*
 
-USER flink
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    kafka-python \
+    psycopg2-binary \
+    cassandra-driver
+
+COPY bench_aggregator.py .
