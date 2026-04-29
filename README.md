@@ -14,7 +14,7 @@ The benchmark consists of several components:
 - **Cassandra**: Alternative storage option for high-throughput scenarios
 - **Grafana**: Visualization dashboard for monitoring benchmark metrics
 - **Loaders**: Six different loading implementations in Python
-
+![Project archetecture](images/spotify-archetecture.png)
 ## Prerequisites
 
 - Docker
